@@ -300,10 +300,8 @@ class PunicaWrapperCPU(PunicaWrapperBase):
 
         if buffer is None:
             r = lora_b_stacked[0].size(-1)
-            # We set the buffer to be float32 by default, consistent with the
-            # triton op
             buffer = tuple(
-                torch.zeros((x.size(0), r), dtype=torch.float32, device=x.device)
+                torch.zeros((x.size(0), r), dtype=x.dtype, device=x.device)
                 for _ in range(len(output_slices))
             )
         self.add_shrink(buffer, x, lora_a_stacked, scale, **kwargs)
@@ -342,9 +340,7 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         x = x.view(-1, x.shape[-1])
         r = lora_b_stacked.size(-1)
         if buffer is None:
-            # We set the buffer to be float32 by default, consistent with the
-            # triton op
-            buffer = torch.zeros((x.size(0), r), dtype=torch.float32, device=x.device)
+            buffer = torch.zeros((x.size(0), r), dtype=x.dtype, device=x.device)
         # LogitsProcessorWithLoRA always using bgmv.
         bgmv_shrink(x, lora_a_stacked, buffer, self.sampler_indices, scale)
         bgmv_expand(buffer, lora_b_stacked, y, self.sampler_indices, add_inputs=True)
