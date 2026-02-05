@@ -121,7 +121,7 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
         output, out_orig_shape = output.view(-1, output.shape[-1]), output.shape
         buffer = torch.zeros(
             (self.n_slices, x.shape[0], self.lora_a_stacked[0].shape[2]),
-            dtype=torch.float32,
+            dtype=x.dtype,
             device=x.device,
         )
 

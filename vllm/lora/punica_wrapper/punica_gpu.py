@@ -10,9 +10,11 @@ https://arxiv.org/abs/2310.18547
 from typing import final
 
 import torch
+from packaging import version
 
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.utils import get_captured_lora_counts
+from vllm.logger import init_logger
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.math_utils import round_up
 
@@ -23,10 +25,15 @@ if HAS_TRITON:
         lora_expand,
         lora_shrink,
     )
+    from vllm.lora.ops.triton_ops.utils import get_lora_op_configs
 
 from vllm import _custom_ops as ops
 
 from .punica_base import PunicaWrapperBase
+
+logger = init_logger(__name__)
+
+TRITON_BF16_ATOMIC_ADD_MIN_VERSION = version.parse("3.4.0")
 
 
 @final
@@ -86,6 +93,41 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         # Prepare cuda kernel metadata tensors
         self.token_mapping_meta.prepare_tensors(self.token_lora_indices)
         self.prompt_mapping_meta.prepare_tensors(self.sampler_indices)
+
+    def _should_use_fp32_shrink_buffer(
+        self,
+        x: torch.Tensor,
+        lora_a_stacked: tuple[torch.Tensor, ...],
+        token_nums: int,
+        meta: "LoRAKernelMeta",
+    ) -> bool:
+        if x.dtype != torch.bfloat16:
+            return False
+        if version.parse(triton.__version__) >= TRITON_BF16_ATOMIC_ADD_MIN_VERSION:
+            return False
+
+        _, _, _, _, lora_ids, _, _ = meta.meta_args(
+            token_nums, self.lora_config.specialize_active_lora
+        )
+        kernel_config = get_lora_op_configs(
+            op_type="shrink",
+            max_loras=lora_ids.size(0),
+            batch=token_nums,
+            hidden_size=lora_a_stacked[0].shape[-1],
+            rank=lora_a_stacked[0].shape[-2],
+            num_slices=len(lora_a_stacked),
+        )
+        split_k = kernel_config.get("split_k") or 1
+        if split_k > 1:
+            logger.warning_once(
+                "Triton %s does not support bf16 atomic add; "
+                "using float32 LoRA shrink buffers with split_k=%d.",
+                triton.__version__,
+                split_k,
+            )
+            return True
+
+        return False
 
     def add_shrink(
         self,
@@ -238,11 +280,16 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             ".add_lora_linear() instead of being passed in."
         )
         r = lora_b_stacked[0].size(-1)
-        # We set the buffer to be float32 by default, refer to:
-        # https://github.com/triton-lang/triton/issues/1387
+        buffer_dtype = x.dtype
+        if self._should_use_fp32_shrink_buffer(
+            x, lora_a_stacked, x.size(0), self.token_mapping_meta
+        ):
+            buffer_dtype = torch.float32
         # Note: buffer is zeroed inside the shrink op
         buffer = torch.empty(
-            (len(output_slices), x.size(0), r), dtype=torch.float32, device=x.device
+            (len(output_slices), x.size(0), r),
+            dtype=buffer_dtype,
+            device=x.device,
         )
 
         self.add_shrink(
@@ -296,10 +343,13 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             "To minimize overhead, the buffer should be created by "
             ".add_lora_linear() instead of being passed in."
         )
-        # We set the buffer to be float32 by default, refer to:
-        # https://github.com/triton-lang/triton/issues/1387
         # Note: buffer is zeroed inside the shrink op
-        buffer = torch.empty((x.size(0), r), dtype=torch.float32, device=x.device)
+        buffer_dtype = x.dtype
+        if self._should_use_fp32_shrink_buffer(
+            x, (lora_a_stacked,), x.size(0), self.prompt_mapping_meta
+        ):
+            buffer_dtype = torch.float32
+        buffer = torch.empty((x.size(0), r), dtype=buffer_dtype, device=x.device)
 
         lora_shrink(
             x,

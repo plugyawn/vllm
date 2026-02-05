@@ -41,7 +41,7 @@ def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
     # tensor rather than a tuple of tensor.
     buffers = torch.zeros(
         (layer.n_slices, x.shape[0], layer.lora_a_stacked[0].shape[2]),
-        dtype=torch.float32,
+        dtype=x.dtype,
         device=x.device,
     )
 
